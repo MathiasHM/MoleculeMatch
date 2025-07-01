@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Molecule Match</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    table {
+      border-collapse: collapse;
+    }
+    td, th {
+      border: 1px solid #ccc;
+      padding: 5px;
+      text-align: center;
+      width: 120px;
+      height: 60px;
+    }
+    input {
+      width: 90%;
+      padding: 4px;
+      font-size: 14px;
+    }
+    datalist {
+      max-height: 100px;
+      overflow-y: auto;
+    }
+    .header {
+      background: #f0f0f0;
+      font-weight: bold;
+    }
+    .valid {
+      background-color: #c8f7c5;
+    }
+    .invalid {
+      background-color: #f7c5c5;
+    }
+  </style>
+</head>
+<body>
+  <h1>Molecule Match</h1>
+  <p>Enter molecule names that match the properties of their row and column.
+  <button onclick="regenerateGrid()">Regenerate Puzzle</button>
+  <table id="moleculeGrid"></table>
+  <datalist id="moleculeList"></datalist>
+
+  <script>
+    const ALL_PROPERTIES = [
+  "Melting pt < -50°C",
+  "Melting pt < 0°C",
+  "Melting pt < 50°C",
+  "Boiling pt < 0°C",
+  "Boiling pt < 25°C",
+  "Boiling pt < 100°C",
+  "Has Cl",
+  "Has N",
+  "Has O",
+  "Has S",
+  "Has F",
+  "Has Br",
+  "Has P",
+  "Mol weight < 50",
+  "Mol weight < 75",
+  "Mol weight < 100",
+  "Mol weight < 150",
+  "Mol weight > 150",
+  "Mol weight > 200",
+  "Mol weight > 250",
+  "Mol weight > 300"
+];
+
+function getRandomizedProperties(count) {
+  const weightTempPrefixes = [
+    "Mol weight <", "Mol weight >",
+    "Melting pt <", "Boiling pt <"
+  ];
+
+  const used = new Set();
+  const categories = new Map();
+
+  const getPrefix = p => {
+    for (const prefix of weightTempPrefixes) {
+      if (p.startsWith(prefix)) return prefix.split(' ')[0];
+    }
+    return null;
+  };
+
+  const isContradictory = (p) => {
+    const prefix = getPrefix(p);
+    if (!prefix) return used.has(p);
+
+    // Prevent both melting and boiling point checks
+    const isMelting = p.startsWith("Melting pt");
+    const isBoiling = p.startsWith("Boiling pt");
+    const usedMelting = [...used].some(u => u.startsWith("Melting pt"));
+    const usedBoiling = [...used].some(u => u.startsWith("Boiling pt"));
+    if ((isMelting && usedBoiling) || (isBoiling && usedMelting)) return true;
+
+    return [...used].some(u => u.startsWith(prefix + ' <') && p.startsWith(prefix + ' >')) ||
+           [...used].some(u => u.startsWith(prefix + ' >') && p.startsWith(prefix + ' <'));
+  };
+
+  const shuffled = [...ALL_PROPERTIES].sort(() => 0.5 - Math.random());
+  const selected = [];
+
+  for (const p of shuffled) {
+    if (selected.length >= count) break;
+    if (!used.has(p) && !isContradictory(p)) {
+      used.add(p);
+      selected.push(p);
+    }
+  }
+
+  return selected;
+}
+
+let ROW_PROPERTIES = getRandomizedProperties(3);
+
+    let COL_PROPERTIES = getRandomizedProperties(3);
+
+    function populateDatalist() {
+      const datalist = document.getElementById("moleculeList");
+
+      document.querySelectorAll('input[list="moleculeList"]').forEach(input => {
+        input.addEventListener("input", async (e) => {
+          const query = e.target.value.trim();
+          if (query.length < 2) return;
+
+          try {
+            const res = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/compound/${encodeURIComponent(query)}/json?limit=10`);
+            const data = await res.json();
+            datalist.innerHTML = "";
+            data.dictionary_terms.compound.forEach(name => {
+              const option = document.createElement("option");
+              option.value = name;
+              datalist.appendChild(option);
+            });
+          } catch (err) {
+            console.warn("Autocomplete error:", err);
+          }
+        });
+      });
+    }
+
+    async function fetchProperties(molecule) {
+      try {
+        const searchRes = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${encodeURIComponent(molecule)}/cids/JSON`);
+        const searchData = await searchRes.json();
+        const cid = searchData.IdentifierList.CID[0];
+
+        const recordRes = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug_view/data/compound/${cid}/JSON`);
+        const recordData = await recordRes.json();
+
+        const record = { MolecularFormula: null, MeltingPoint: null, BoilingPoint: null };
+
+        function findProperty(sectionList, name) {
+          for (const section of sectionList) {
+            if (section.TOCHeading === name) {
+              const str = section.Information?.[0]?.Value?.StringWithMarkup?.[0]?.String;
+              if (str) return parseFloat(str);
+            }
+            if (section.Section) {
+              const found = findProperty(section.Section, name);
+              if (found !== null) return found;
+            }
+          }
+          return null;
+        }
+
+        const sections = recordData.Record.Section;
+        record.MeltingPoint = findProperty(sections, "Melting Point");
+        record.BoilingPoint = findProperty(sections, "Boiling Point");
+
+        const fallbackRes = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/${cid}/property/MolecularFormula,MolecularWeight/JSON`);
+        const fallbackData = await fallbackRes.json();
+        record.MolecularFormula = fallbackData.PropertyTable.Properties[0].MolecularFormula;
+        record.MolecularWeight = fallbackData.PropertyTable.Properties[0].MolecularWeight;
+
+        return record;
+      } catch (e) {
+        console.warn("Fetch failed for", molecule, e);
+        return null;
+      }
+    }
+
+    
+
+function analyzeProperties(props) {
+  const results = [];
+  const formula = props.MolecularFormula || "";
+  const mp = props.MeltingPoint !== undefined ? parseFloat(props.MeltingPoint) : null;
+  const bp = props.BoilingPoint !== undefined ? parseFloat(props.BoilingPoint) : null;
+
+  if (mp !== null && !isNaN(mp)) {
+    if (mp < -50) results.push("Melting pt < -50°C");
+    if (mp < 0) results.push("Melting pt < 0°C");
+    if (mp < 50) results.push("Melting pt < 50°C");
+  }
+  if (bp !== null && !isNaN(bp)) {
+    if (bp < 0) results.push("Boiling pt < 0°C");
+    if (bp < 25) results.push("Boiling pt < 25°C");
+    if (bp < 100) results.push("Boiling pt < 100°C");
+  }
+  if (/Cl/.test(formula)) results.push("Has Cl");
+  if (/N/.test(formula)) results.push("Has N");
+  if (/O/.test(formula)) results.push("Has O");
+  if (/S/.test(formula)) results.push("Has S");
+  if (/F/.test(formula)) results.push("Has F");
+  if (/Br/.test(formula)) results.push("Has Br");
+  if (/P/.test(formula)) results.push("Has P");
+
+  const mw = props.MolecularWeight;
+  if (mw !== null) {
+    if (mw < 50) results.push("Mol weight < 50");
+    if (mw < 75) results.push("Mol weight < 75");
+    if (mw < 100) results.push("Mol weight < 100");
+    if (mw < 150) results.push("Mol weight < 150");
+    if (mw > 150) results.push("Mol weight > 150");
+    if (mw > 200) results.push("Mol weight > 200");
+    if (mw > 250) results.push("Mol weight > 250");
+    if (mw > 300) results.push("Mol weight > 300");
+  }
+
+  return results;
+}
+
+    async function validateInput(input, rowProp, colProp) {
+      const molecule = input.value.trim();
+      if (molecule === "") {
+        input.classList.remove("valid", "invalid");
+        return;
+      }
+
+      const props = await fetchProperties(molecule);
+      if (!props) {
+        input.classList.remove("valid");
+        input.classList.add("invalid");
+        return;
+      }
+
+      const tags = analyzeProperties(props);
+      if (tags.includes(rowProp) && tags.includes(colProp)) {
+        input.classList.add("valid");
+        input.classList.remove("invalid");
+      } else {
+        input.classList.remove("valid");
+        input.classList.add("invalid");
+      }
+    }
+
+    function buildGrid() {
+      const table = document.getElementById("moleculeGrid");
+      table.innerHTML = "";
+
+      for (let r = -1; r < 3; r++) {
+        const row = document.createElement("tr");
+        for (let c = -1; c < 3; c++) {
+          const cell = document.createElement(r === -1 || c === -1 ? "th" : "td");
+
+          if (r === -1 && c === -1) {
+            cell.textContent = "";
+          } else if (r === -1) {
+            cell.textContent = COL_PROPERTIES[c];
+            cell.className = "header";
+          } else if (c === -1) {
+            cell.textContent = ROW_PROPERTIES[r];
+            cell.className = "header";
+          } else {
+            const input = document.createElement("input");
+            input.setAttribute("data-row", r);
+            input.setAttribute("data-col", c);
+            input.setAttribute("list", "moleculeList");
+            input.placeholder = "Molecule";
+            input.addEventListener("change", () => {
+              const rowProp = ROW_PROPERTIES[r];
+              const colProp = COL_PROPERTIES[c];
+              validateInput(input, rowProp, colProp);
+            });
+            cell.appendChild(input);
+          }
+
+          row.appendChild(cell);
+        }
+        table.appendChild(row);
+      }
+      populateDatalist();
+    }
+
+    function regenerateGrid() {
+      ROW_PROPERTIES = getRandomizedProperties(3);
+      COL_PROPERTIES = getRandomizedProperties(3);
+      buildGrid();
+    }
+  </script>
+</body>
+</html>
